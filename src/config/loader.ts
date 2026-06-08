@@ -1,0 +1,195 @@
+import YAML from 'yaml';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import type { JarvisConfig } from './types.ts';
+import { DEFAULT_CONFIG } from './types.ts';
+import { secureParentDirectory, secureWriteFile } from '../util/fs-secure.ts';
+
+function expandTilde(filepath: string): string {
+  if (filepath.startsWith('~/')) {
+    return join(homedir(), filepath.slice(2));
+  }
+  return filepath;
+}
+
+function deepMerge(target: any, source: any): any {
+  if (!source || typeof source !== 'object') {
+    // If source is absent, return a clone of target so callers (or subsequent
+    // mutation of the returned value) can never alias shared defaults.
+    return source !== undefined ? source : structuredClone(target);
+  }
+
+  if (Array.isArray(source)) {
+    return [...source];
+  }
+
+  const result = { ...target };
+
+  for (const key in source) {
+    if (source.hasOwnProperty(key)) {
+      if (
+        source[key] &&
+        typeof source[key] === 'object' &&
+        !Array.isArray(source[key]) &&
+        target[key] &&
+        typeof target[key] === 'object' &&
+        !Array.isArray(target[key])
+      ) {
+        result[key] = deepMerge(target[key], source[key]);
+      } else {
+        result[key] = source[key];
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Apply environment variable overrides to config.
+ * Env vars take highest precedence (over YAML and defaults).
+ */
+function applyEnvOverrides(config: JarvisConfig): void {
+  const env = process.env;
+
+  if (env.JARVIS_PORT) {
+    const port = parseInt(env.JARVIS_PORT, 10);
+    if (!isNaN(port)) config.daemon.port = port;
+  }
+
+  if (env.JARVIS_HOME) {
+    const home = env.JARVIS_HOME;
+    config.daemon.data_dir = home;
+    config.daemon.db_path = join(home, 'jarvis.db');
+  }
+
+  if (env.JARVIS_API_KEY) {
+    if (!config.llm.anthropic) config.llm.anthropic = { api_key: '', model: 'claude-sonnet-4-5-20250929' };
+    config.llm.anthropic.api_key = env.JARVIS_API_KEY;
+  }
+
+  if (env.JARVIS_OPENAI_KEY) {
+    if (!config.llm.openai) config.llm.openai = { api_key: '', model: 'gpt-4o' };
+    config.llm.openai.api_key = env.JARVIS_OPENAI_KEY;
+  }
+
+  if (env.JARVIS_GROQ_KEY) {
+    if (!config.llm.groq) config.llm.groq = { api_key: '', model: 'llama-3.3-70b-versatile' };
+    config.llm.groq.api_key = env.JARVIS_GROQ_KEY;
+  }
+
+  if (env.JARVIS_OLLAMA_URL) {
+    if (!config.llm.ollama) config.llm.ollama = { base_url: '', model: 'llama3' };
+    config.llm.ollama.base_url = env.JARVIS_OLLAMA_URL;
+  }
+
+  if (env.JARVIS_OPENROUTER_KEY) {
+    if (!config.llm.openrouter) config.llm.openrouter = { api_key: '', model: 'anthropic/claude-sonnet-4' };
+    config.llm.openrouter.api_key = env.JARVIS_OPENROUTER_KEY;
+  }
+
+  if (env.NVIDIA_API_KEY) {
+    if (!config.llm.nvidia) config.llm.nvidia = { api_key: '', model: 'meta/llama-3.3-70b-instruct' };
+    config.llm.nvidia.api_key = env.NVIDIA_API_KEY;
+  }
+
+  if (env.JARVIS_LITELLM_URL || env.JARVIS_LITELLM_KEY) {
+    if (!config.llm.litellm) config.llm.litellm = { base_url: 'http://localhost:4000/v1', api_key: '', model: '' };
+    if (env.JARVIS_LITELLM_URL) config.llm.litellm.base_url = env.JARVIS_LITELLM_URL;
+    if (env.JARVIS_LITELLM_KEY) config.llm.litellm.api_key = env.JARVIS_LITELLM_KEY;
+  }
+
+  if (env.JARVIS_BRAIN_DOMAIN) {
+    config.daemon.brain_domain = env.JARVIS_BRAIN_DOMAIN;
+  }
+
+  if (env.JARVIS_AUTH_TOKEN) {
+    if (!config.auth) config.auth = {};
+    config.auth.token = env.JARVIS_AUTH_TOKEN;
+  }
+
+  if (env.JARVIS_WAKE_ENGINE) {
+    const engine = env.JARVIS_WAKE_ENGINE;
+    if (engine === 'openwakeword' || engine === 'webspeech' || engine === 'auto') {
+      if (!config.voice) config.voice = { wake_engine: 'openwakeword' };
+      config.voice.wake_engine = engine;
+    } else {
+      console.warn(`[Config] Invalid JARVIS_WAKE_ENGINE="${engine}" — must be openwakeword|webspeech|auto; ignoring.`);
+    }
+  }
+
+  // Premium realtime voice (gpt-realtime-2). Truthy values enable; "0"/"false"
+  // explicitly disable. See docs/GPT_REALTIME_2_INTEGRATION.md.
+  if (env.JARVIS_REALTIME_VOICE !== undefined) {
+    if (!config.voice) config.voice = { wake_engine: 'openwakeword' };
+    if (!config.voice.realtime) config.voice.realtime = { enabled: false };
+    const v = env.JARVIS_REALTIME_VOICE.trim().toLowerCase();
+    config.voice.realtime.enabled = v !== '' && v !== '0' && v !== 'false' && v !== 'no';
+  }
+}
+
+export async function loadConfig(configPath?: string): Promise<JarvisConfig> {
+  const path = configPath || expandTilde('~/.jarvis/config.yaml');
+
+  const file = Bun.file(path);
+  const exists = await file.exists();
+
+  if (!exists) {
+    console.warn(`Config file not found at ${path}, using defaults`);
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.daemon.data_dir = expandTilde(config.daemon.data_dir);
+    config.daemon.db_path = expandTilde(config.daemon.db_path);
+    applyEnvOverrides(config);
+    return config;
+  }
+
+  // File exists — parse errors should be fatal.
+  // `merge: true` enables YAML merge keys (`<<: *anchor`) so configs can share
+  // blocks across environments. Removing this flag would silently break any
+  // config that relies on anchors — keep it unless you're sure.
+  const text = await file.text();
+  const doc = YAML.parseDocument(text, { merge: true });
+  if (doc.errors.length > 0) {
+    // `yaml`'s error.message already embeds `at line X, column Y:` and a caret
+    // diagram, so no need to prefix our own position info.
+    const formatted = doc.errors.map((entry) => entry.message);
+    throw new Error(`Failed to parse YAML config at ${path}:\n  ${formatted.join('\n  ')}`);
+  }
+  // `doc.toJS()` returns null for an empty (or comment-only) file — coerce to
+  // an empty object so downstream merges fall back cleanly to defaults.
+  const parsed = (doc.toJS() ?? {}) as Partial<JarvisConfig>;
+
+  // Deep merge with defaults to ensure all required fields exist
+  const config = deepMerge(structuredClone(DEFAULT_CONFIG), parsed) as JarvisConfig;
+
+  // Expand tilde in paths
+  config.daemon.data_dir = expandTilde(config.daemon.data_dir);
+  config.daemon.db_path = expandTilde(config.daemon.db_path);
+
+  // Apply environment variable overrides
+  applyEnvOverrides(config);
+
+  return config;
+}
+
+export async function saveConfig(
+  config: JarvisConfig,
+  configPath?: string
+): Promise<void> {
+  const path = configPath || expandTilde('~/.jarvis/config.yaml');
+
+  try {
+    const yaml = YAML.stringify(config, {
+      indent: 2,
+      lineWidth: 100,
+      defaultStringType: 'PLAIN',
+      defaultKeyType: 'PLAIN',
+    });
+
+    await secureParentDirectory(path);
+    await secureWriteFile(path, yaml, 0o600, 'Config');
+    console.log(`Config saved to ${path}`);
+  } catch (err) {
+    throw new Error(`Failed to save config to ${path}: ${err}`);
+  }
+}

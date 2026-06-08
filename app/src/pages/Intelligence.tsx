@@ -1,0 +1,246 @@
+import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+
+import { ConfirmationModal } from '../components/intelligence/ConfirmationModal';
+import IntelligenceAgentsTab from '../components/intelligence/IntelligenceAgentsTab';
+import IntelligenceSubconsciousTab from '../components/intelligence/IntelligenceSubconsciousTab';
+import IntelligenceTasksTab from '../components/intelligence/IntelligenceTasksTab';
+import MemorySection from '../components/intelligence/MemorySection';
+import ModelCouncilTab from '../components/intelligence/ModelCouncilTab';
+import { ToastContainer } from '../components/intelligence/Toast';
+import WorkflowsTab from '../components/intelligence/WorkflowsTab';
+import KnowledgeGraph from '../components/graph/KnowledgeGraph';
+import PillTabBar from '../components/PillTabBar';
+import {
+  useIntelligenceSocket,
+  useIntelligenceSocketManager,
+} from '../hooks/useIntelligenceSocket';
+import { useSubconscious } from '../hooks/useSubconscious';
+import { useT } from '../lib/i18n/I18nContext';
+import type {
+  ConfirmationModal as ConfirmationModalType,
+  ToastNotification,
+} from '../types/intelligence';
+import { IS_DEV } from '../utils/config';
+
+type IntelligenceTab = 'memory' | 'subconscious' | 'tasks' | 'agents' | 'workflows' | 'council' | 'graph';
+
+const INTELLIGENCE_TABS: IntelligenceTab[] = [
+  'memory',
+  'subconscious',
+  'tasks',
+  'agents',
+  'workflows',
+  'council',
+  'graph',
+];
+
+// Tabs gated to dev builds (mirrors the `devOnly` flags on `allTabs` below).
+// A `?tab=` deep link must be validated against the *visible* set, not the raw
+// enum, so `?tab=council` can't force-open a hidden dev-only tab in prod.
+const DEV_ONLY_TABS: IntelligenceTab[] = ['council'];
+
+const isVisibleTab = (tab: string | null | undefined): tab is IntelligenceTab =>
+  (INTELLIGENCE_TABS as string[]).includes(tab ?? '') &&
+  (IS_DEV || !(DEV_ONLY_TABS as string[]).includes(tab ?? ''));
+
+export default function Intelligence() {
+  const { t } = useT();
+
+  // Tab is URL-backed (`/intelligence?tab=…`) so navigating away — e.g. to
+  // Settings → Task Sources from the Agent Tasks tab — and coming back via
+  // browser-back restores the same tab instead of resetting to Memory.
+  // `replace` so switching tabs doesn't stack history entries.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const activeTab: IntelligenceTab = isVisibleTab(tabParam) ? tabParam : 'tasks';
+  const setActiveTab = useCallback(
+    (tab: IntelligenceTab) => {
+      setSearchParams(
+        prev => {
+          prev.set('tab', tab);
+          return prev;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
+  // The legacy header pills (system-status + Ingesting/Queued chips) were
+  // sourced from `useConsciousItems` + `useMemoryIngestionStatus`. They are
+  // replaced by the Memory Tree status panel (#1856 Part 1), rendered inside
+  // `MemoryWorkspace`, which polls `memory_tree_pipeline_status` for a much
+  // richer dashboard. The hooks themselves still exist for any future
+  // consumers / tests; we just no longer feed them into a half-baked pill
+  // up here.
+
+  // useUpdateActionableItem / useSnoozeActionableItem hooks were the
+  // mutations behind handleComplete / Dismiss / Snooze. Removed along
+  // with those handlers since the Memory tab no longer renders the
+  // actionable-card surface.
+
+  // Subconscious engine data
+  const {
+    status: subconsciousEngineStatus,
+    mode: subconsciousMode,
+    intervalMinutes: subconsciousInterval,
+    triggering: subconsciousTriggering,
+    settingMode: subconsciousSettingMode,
+    triggerTick,
+    setMode: setSubconsciousMode,
+    setIntervalMinutes: setSubconsciousInterval,
+  } = useSubconscious();
+
+  // Socket integration
+  const socketManager = useIntelligenceSocketManager();
+  const { isConnected: socketConnected } = useIntelligenceSocket();
+
+  // Local state for UI
+  const [toasts, setToasts] = useState<ToastNotification[]>([]);
+  const [confirmationModal, setConfirmationModal] = useState<ConfirmationModalType>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+    onCancel: () => {},
+  });
+
+  const addToast = useCallback((toast: Omit<ToastNotification, 'id'>) => {
+    const newToast: ToastNotification = { ...toast, id: `toast-${Date.now()}-${Math.random()}` };
+    setToasts(prev => [...prev, newToast]);
+  }, []);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(toast => toast.id !== id));
+  }, []);
+
+  // Initialize socket connection
+  useEffect(() => {
+    if (!socketConnected) {
+      socketManager.connect();
+    }
+  }, [socketConnected, socketManager]);
+
+  const allTabs: {
+    id: IntelligenceTab;
+    label: string;
+    description?: string;
+    comingSoon?: boolean;
+    devOnly?: boolean;
+  }[] = [
+    { id: 'tasks', label: t('memory.tab.tasks'), description: t('memory.tab.tasksDescription') },
+    { id: 'memory', label: t('memory.tab.memory') },
+    { id: 'subconscious', label: t('memory.tab.subconscious') },
+    {
+      id: 'workflows',
+      label: t('memory.tab.workflows'),
+      description: t('memory.tab.workflowsDescription'),
+    },
+    { id: 'council', label: t('memory.tab.council'), devOnly: true },
+    { id: 'agents', label: t('memory.tab.agents'), description: t('memory.tab.agentsDescription') },
+    { id: 'graph', label: '🧠 Knowledge Graph', description: 'Live neural map of your system' },
+  ];
+  const tabs = allTabs.filter(tab => !tab.devOnly || IS_DEV);
+  const activeTabDef = tabs.find(tab => tab.id === activeTab);
+
+  return (
+    <div className="min-h-full p-4 pt-6">
+      <div className="max-w-4xl mx-auto space-y-4">
+        <PillTabBar
+          items={tabs.map(tab => ({ label: tab.label, value: tab.id }))}
+          selected={activeTab}
+          onChange={setActiveTab}
+          activeClassName="border-primary-600 bg-primary-600 text-white"
+          renderItem={(item, active) => {
+            const tab = tabs.find(entry => entry.id === item.value);
+            return (
+              <span className="inline-flex items-center gap-1.5">
+                <span>{item.label}</span>
+                {tab?.comingSoon && (
+                  <span
+                    className={`rounded-full border px-1.5 py-0.5 text-[10px] ${
+                      active
+                        ? 'border-white/30 bg-white/15 text-white'
+                        : 'border-stone-200 dark:border-neutral-800 bg-stone-50 dark:bg-neutral-800/60 text-stone-500 dark:text-neutral-400'
+                    }`}>
+                    {t('misc.beta')}
+                  </span>
+                )}
+              </span>
+            );
+          }}
+        />
+
+        <div className="bg-white dark:bg-neutral-900 rounded-2xl shadow-soft border border-stone-200 dark:border-neutral-800 p-6">
+          <div>
+            {/* Header — reflects the active tab so the panel title matches
+                what's shown below it (e.g. "Agent Tasks" on the Tasks tab),
+                rather than a static "Memory". */}
+            <div className="flex items-center justify-between mb-6">
+              <div className="min-w-0">
+                <h1
+                  className="text-xl font-bold text-stone-900 dark:text-neutral-100"
+                  data-walkthrough="intelligence-header">
+                  {activeTabDef?.label ?? t('memory.title')}
+                </h1>
+                {activeTabDef?.description && (
+                  <p className="mt-1 text-sm text-stone-500 dark:text-neutral-400">
+                    {activeTabDef.description}
+                  </p>
+                )}
+                {/* Header count badge was sourced from `stats.total` which
+                    in turn came from the legacy actionable-items pipeline
+                    (`filterItems(items, ...)`). The Memory tab now mounts
+                    `MemoryWorkspace`, which renders chunks from
+                    `memory_tree` and has nothing to do with that pipeline,
+                    so the badge would have shown a count that no longer
+                    matches anything visible. Hidden until a memory_tree
+                    -native count signal is exposed. */}
+              </div>
+            </div>
+
+            {/* Tab content */}
+            {activeTab === 'memory' && <MemorySection onToast={addToast} />}
+
+            {activeTab === 'subconscious' && (
+              <IntelligenceSubconsciousTab
+                status={subconsciousEngineStatus}
+                mode={subconsciousMode}
+                intervalMinutes={subconsciousInterval}
+                triggerTick={triggerTick}
+                triggering={subconsciousTriggering}
+                settingMode={subconsciousSettingMode}
+                setMode={setSubconsciousMode}
+                setIntervalMinutes={setSubconsciousInterval}
+              />
+            )}
+
+            {activeTab === 'tasks' && <IntelligenceTasksTab />}
+
+            {activeTab === 'agents' && <IntelligenceAgentsTab />}
+
+            {activeTab === 'workflows' && <WorkflowsTab />}
+
+            {activeTab === 'council' && <ModelCouncilTab />}
+
+            {activeTab === 'graph' && (
+              <div style={{ height: 600 }}>
+                <KnowledgeGraph apiBase="http://127.0.0.1:3142" />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Toast notifications */}
+      <ToastContainer notifications={toasts} onRemove={removeToast} />
+
+      {/* Confirmation modal */}
+      <ConfirmationModal
+        modal={confirmationModal}
+        onClose={() => setConfirmationModal(prev => ({ ...prev, isOpen: false }))}
+      />
+    </div>
+  );
+}

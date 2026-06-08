@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+
+# Rust build artifacts
+target/
+
+# Bun
+bun.lockb
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Gigi runtime data
+~/.gigi/
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Tauri
+app/src-tauri/target/
